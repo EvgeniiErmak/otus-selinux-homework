@@ -47,3 +47,45 @@ nginx — единый systemd-сервис с одним мастер-проц�
 Это подтвердилось экспериментально: временное отключение `nis_enabled` уронило
 не только 8091, но и рестарт всего сервиса целиком, пока оба порта не были
 корректно размечены.
+
+## Способ 3: кастомный модуль SELinux через audit2allow (порт 8093)
+
+Порт 8093 не размечен никаким специфичным типом и не покрывается булевым
+переключателем `nis_enabled` (временно отключённым на момент теста, чтобы
+получить денай в чистом виде). Формируем модуль напрямую из audit.log.
+
+### Воспроизведение
+
+1. Конфиг nginx слушает порт 8093 (`/etc/nginx/conf.d/hw1-module.conf`)
+2. Временно `setsebool -P nis_enabled off`, чтобы не смешивать со способом 1
+3. Очищаем `audit.log`, перезапускаем nginx — получаем денай:
+   `avc: denied { name_bind } ... src=8093 ... tcontext=unreserved_port_t`
+4. `audit2allow -M nginx_hw1_8093 < /var/log/audit/audit.log`
+5. Генерируется `nginx_hw1_8093.te`:
+module nginx_hw1_8093 1.0;
+require {
+type httpd_t;
+type unreserved_port_t;
+class tcp_socket name_bind;
+}
+allow httpd_t unreserved_port_t:tcp_socket name_bind;
+   и скомпилированный `nginx_hw1_8093.pp`
+6. `semodule -i nginx_hw1_8093.pp`
+7. Возвращаем `setsebool -P nis_enabled on` (чтобы способ 1 тоже остался рабочим)
+8. `systemctl restart nginx` — успешный старт, все три порта отвечают:
+   - `curl :8091` → `hw1: setsebool method works on 8091`
+   - `curl :8092` → `hw1: semanage method works on 8092`
+   - `curl :8093` → `hw1: custom SELinux module works on 8093`
+
+Файлы модуля: [`nginx_hw1_8093.te`](./nginx_hw1_8093.te), [`nginx_hw1_8093.pp`](./nginx_hw1_8093.pp)
+
+## Итог
+
+Все три способа продемонстрированы одновременно на одном запущенном nginx,
+каждый на своём порту и своим независимым SELinux-механизмом:
+
+| Порт | Способ | Механизм |
+|------|--------|----------|
+| 8091 | setsebool | `nis_enabled` → разрешает bind на весь `unreserved_port_t` |
+| 8092 | semanage port | точечная регистрация порта в `http_port_t` |
+| 8093 | кастомный модуль | `audit2allow` → `allow httpd_t unreserved_port_t:tcp_socket name_bind;` |
