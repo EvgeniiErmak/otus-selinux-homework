@@ -23,3 +23,27 @@ httpd_t биндить непривилегированные порты).
 5. Применяем: `setsebool -P nis_enabled on`
 6. `systemctl restart nginx` — успешный старт
 7. `curl http://localhost:8091` → `hw1: setsebool method works on 8091`
+
+## Способ 2: semanage port (порт 8092)
+
+Регистрируем порт 8092 напрямую в существующем типе `http_port_t`
+(том же, что уже покрывает 80, 443, 8080 и т.д.) — это самый "штатный"
+способ для одиночного сервиса, без побочных эффектов на другие домены.
+
+### Воспроизведение
+
+1. Конфиг nginx слушает порт 8092 (`/etc/nginx/conf.d/hw1-semanage.conf`)
+2. Денай: `avc: denied { name_bind } ... src=8092 ... tcontext=unreserved_port_t`
+3. `semanage port -a -t http_port_t -p tcp 8092`
+4. `semanage port -l | grep http_port_t` → `http_port_t tcp 8092, 80, 81, 443, ...`
+5. `systemctl restart nginx` — успешный старт
+6. `curl http://localhost:8092` → `hw1: semanage method works on 8092`
+
+### Важное наблюдение
+
+nginx — единый systemd-сервис с одним мастер-процессом: все `listen`-директивы
+во всех `server{}`-блоках применяются при одном старте. Если SELinux блокирует
+бинд хотя бы одного порта — падает **весь** nginx, а не только проблемный блок.
+Это подтвердилось экспериментально: временное отключение `nis_enabled` уронило
+не только 8091, но и рестарт всего сервиса целиком, пока оба порта не были
+корректно размечены.
