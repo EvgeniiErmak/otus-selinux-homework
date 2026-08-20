@@ -2,6 +2,8 @@
 
 ## Стенд
 
+Репозиторий стенда: https://github.com/Nickmob/vagrant_selinux_dns_problems
+
 Развёрнут через Vagrant + libvirt (провайдер virtualbox в исходном
 Vagrantfile заменён на libvirt через `vagrant up --provider=libvirt`,
 так как VirtualBox 7.0/7.1 несовместим с ядром AlmaLinux 9.8 —
