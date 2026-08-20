@@ -21,10 +21,9 @@ Vagrantfile заменён на libvirt через `vagrant up --provider=libvir
     };
 
 Файлы зоны копируются Ansible-плейбуком в нестандартный путь
-/etc/named/dynamic/ (вместо штатного /var/named/dynamic/).
-Директория /etc/named целиком размечена SELinux-политикой как
-named_conf_t — тип только для чтения конфигурации, без права write
-для домена процесса named_t.
+/etc/named/ (вместо штатного /var/named/). Директория /etc/named
+целиком размечена SELinux-политикой как named_conf_t — тип только
+для чтения конфигурации, без права write для домена процесса named_t.
 
 При попытке nsupdate внести изменение в зону, named успешно проходит
 TSIG-авторизацию (ключ верный), но при попытке физически записать
@@ -33,14 +32,16 @@ TSIG-авторизацию (ключ верный), но при попытке 
 
 ### Подтверждение
 
-    $ ls -Zd /etc/named/dynamic
-    unconfined_u:object_r:named_conf_t:s0 /etc/named/dynamic
+    $ ls -laZ /etc/named
+    drw-rwx---. root named system_u:object_r:named_conf_t:s0 .
+    drw-rwx---. root named unconfined_u:object_r:named_conf_t:s0 dynamic
+    -rw-rw----. root named system_u:object_r:named_conf_t:s0 named.dns.lab
+    ...
 
-    $ sesearch -A -s named_t -t named_conf_t -c file -p write
-    (пусто — правила нет)
+Для сравнения — контекст штатной зоны localhost:
 
-    $ sesearch -A -s named_t -t named_cache_t -c file -p write
-    allow named_t named_cache_t:file { append create ... write };
+    $ ls -alZ /var/named/named.localhost
+    system_u:object_r:named_zone_t:s0 /var/named/named.localhost
 
 Живой AVC-денай, пойманный в момент запроса nsupdate:
 
@@ -52,34 +53,46 @@ TSIG-авторизацию (ключ верный), но при попытке 
 
 ## Варианты решения
 
-1. semanage fcontext + restorecon — назначить /etc/named/dynamic(/.*)?
-   тип named_cache_t постоянно, переживает restorecon/relabel системы.
-2. chcon — то же самое, но временно; слетает при следующем полном
-   relabel.
-3. Кастомный модуль audit2allow — избыточно: правило allow named_t
-   к named_cache_t уже существует в штатной политике, проблема не в
-   отсутствии правила, а в неверной разметке пути.
-4. Перенос зоны в стандартный /var/named/dynamic — устранило бы
-   проблему, но требует правки named.conf и меняет архитектуру стенда,
-   а не решает исходную SELinux-задачу как таковую.
+1. semanage fcontext -a -t named_zone_t "/etc/named(/.*)?" + restorecon —
+   назначить всей директории /etc/named правильный, штатный для зон
+   BIND тип named_zone_t (тот же, что уже используется для /var/named
+   по умолчанию в политике). Персистентно, переживает restorecon и
+   relabel системы.
+2. chcon -R -t named_zone_t /etc/named — то же самое, но временно;
+   без предварительного semanage fcontext контекст слетит обратно при
+   следующем restorecon (это наглядно проверено: после отката через
+   restorecon без предварительного semanage правило возвращается на
+   исходный named_conf_t).
+3. Кастомный модуль audit2allow — избыточно: allow-правило
+   named_t → named_zone_t уже существует в штатной политике,
+   проблема не в отсутствии правила, а в неверной разметке пути.
+4. Перенос зоны в стандартный /var/named — устранило бы проблему, но
+   требует правки named.conf и меняет архитектуру стенда, а не решает
+   исходную SELinux-задачу как таковую.
 
 ## Выбор и обоснование
 
-Выбран способ 1 (semanage fcontext) — это штатный, персистентный
-механизм SELinux именно для случая "легитимный, но нестандартный путь
-файла нужно ассоциировать с правильным типом", без изменения политики
-или архитектуры сервиса.
+Выбран способ 1 (semanage fcontext + restorecon) — персистентный
+штатный механизм SELinux для случая, когда легитимный, но нестандартный
+путь файла нужно ассоциировать с правильным типом, без изменения самой
+политики или архитектуры сервиса. Тип named_zone_t выбран по аналогии
+с уже существующей зоной /var/named/named.localhost, размеченной этим
+же типом в штатной политике — то есть используется существующий,
+предназначенный именно для DNS-зон тип, а не создаётся новый.
 
 ## Реализация
 
-    semanage fcontext -a -t named_cache_t "/etc/named/dynamic(/.*)?"
-    restorecon -Rv /etc/named/dynamic
+    semanage fcontext -a -t named_zone_t "/etc/named(/.*)?"
+    restorecon -Rv /etc/named
 
-Результат:
+Результат — вся директория /etc/named и все вложенные файлы/подкаталоги
+(включая dynamic) переразмечены в named_zone_t:
 
-    Relabeled /etc/named/dynamic from ...named_conf_t:s0 to ...named_cache_t:s0
-    Relabeled /etc/named/dynamic/named.ddns.lab from ...named_conf_t:s0 to ...named_cache_t:s0
-    Relabeled /etc/named/dynamic/named.ddns.lab.view1 from ...named_conf_t:s0 to ...named_cache_t:s0
+    Relabeled /etc/named from ...named_conf_t:s0 to ...named_zone_t:s0
+    Relabeled /etc/named/named.dns.lab from ...named_conf_t:s0 to ...named_zone_t:s0
+    Relabeled /etc/named/dynamic from ...named_conf_t:s0 to ...named_zone_t:s0
+    Relabeled /etc/named/dynamic/named.ddns.lab from ...named_conf_t:s0 to ...named_zone_t:s0
+    ...
 
 ## Демонстрация работоспособности
 
